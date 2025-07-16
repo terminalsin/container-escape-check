@@ -1,0 +1,13 @@
+# Exclude documentation and images
+README.md
+README_ZH.md
+img.png
+LICENSE
+
+# Exclude git files
+.git
+.gitignore
+
+# Exclude Docker files themselves
+Dockerfile
+.dockerignore 
