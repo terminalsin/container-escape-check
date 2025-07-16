@@ -8,6 +8,9 @@ LICENSE
 .git
 .gitignore
 
-# Exclude Docker files themselves
+# Exclude Docker files themselves (but keep Node.js files for buildpack)
 Dockerfile
-.dockerignore 
+.dockerignore
+
+# Node modules (will be installed during build)
+node_modules/ 

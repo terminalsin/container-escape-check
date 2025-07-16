@@ -1,0 +1,14 @@
+[_]
+schema-version = "0.2"
+
+[io.buildpacks.build.env]
+BP_NODE_RUN_SCRIPTS = "build"
+
+[[io.buildpacks.group]]
+id = "heroku/nodejs-engine"
+
+[[io.buildpacks.group]]
+id = "heroku/nodejs-npm-install"
+
+[[io.buildpacks.group]]
+id = "heroku/procfile"
