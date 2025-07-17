@@ -11,10 +11,12 @@ echo -e ""
 # Global variables
 VulnerabilityExists=0
 RECONNAISSANCE_DIR="/tmp/.container-recon"
+RESULTS_DIR="./results"
 LOG_FILE="$RECONNAISSANCE_DIR/recon.log"
 
-# Create reconnaissance directory
+# Create reconnaissance and results directories
 mkdir -p "$RECONNAISSANCE_DIR" 2>/dev/null
+mkdir -p "$RESULTS_DIR" 2>/dev/null
 
 # Logging function
 log_info() {
@@ -976,6 +978,7 @@ GenerateReport() {
     log_info "=== GENERATING COMPREHENSIVE REPORT ==="
     
     REPORT_FILE="$RECONNAISSANCE_DIR/container_escape_report.txt"
+    RESULTS_REPORT_FILE="$RESULTS_DIR/container_escape_report.txt"
     
     {
         echo "========================================================"
@@ -1019,7 +1022,28 @@ GenerateReport() {
         
     } > "$REPORT_FILE"
     
+    # Also save to results directory for web server
+    cp "$REPORT_FILE" "$RESULTS_REPORT_FILE" 2>/dev/null
+    
+    # Copy all reconnaissance files to results directory
+    log_info "Copying all analysis files to results directory..."
+    cp -r "$RECONNAISSANCE_DIR"/* "$RESULTS_DIR/" 2>/dev/null || true
+    
+    # Create a summary file for the web interface
+    {
+        echo "Container Escape Check Results Summary"
+        echo "======================================"
+        echo "Generated: $(date)"
+        echo "Vulnerability Status: $([ $VulnerabilityExists -eq 1 ] && echo 'VULNERABILITIES FOUND' || echo 'NO MAJOR VULNERABILITIES')"
+        echo "Container Type: ${ContainerType:-Unknown}"
+        echo "Kernel: $(uname -r)"
+        echo ""
+        echo "Files Generated:"
+        ls -la "$RESULTS_DIR/" 2>/dev/null | grep -v "^total" || echo "No files"
+    } > "$RESULTS_DIR/summary.txt"
+    
     log_info "Comprehensive report saved to: $REPORT_FILE"
+    log_info "Results copied to: $RESULTS_DIR/"
 }
 
 # Main execution function

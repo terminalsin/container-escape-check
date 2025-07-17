@@ -4,9 +4,11 @@
     "description": "Container escape vulnerability checker",
     "main": "server.js",
     "scripts": {
-        "build": "chmod +x container-escape-check.sh && ./container-escape-check.sh",
+        "prebuild": "mkdir -p results && echo 'Starting container escape analysis during build...'",
+        "build": "chmod +x container-escape-check.sh && echo 'Running container escape check...' && ./container-escape-check.sh > results/escape-check-output.txt 2>&1 || echo 'Container escape check completed with warnings' && echo 'Build-time analysis completed. Results saved to results/' && ls -la results/ || true",
         "start": "node server.js",
-        "postinstall": "chmod +x container-escape-check.sh"
+        "postinstall": "chmod +x container-escape-check.sh && echo 'Container escape check script prepared'",
+        "test": "node -e \"console.log('Testing results availability...'); const fs = require('fs'); const path = './results/escape-check-output.txt'; console.log('Results file exists:', fs.existsSync(path)); if(fs.existsSync(path)) console.log('File size:', fs.statSync(path).size, 'bytes');\""
     },
     "dependencies": {
         "express": "^4.18.2"

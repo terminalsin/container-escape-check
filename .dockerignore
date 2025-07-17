@@ -13,4 +13,7 @@ Dockerfile
 .dockerignore
 
 # Node modules (will be installed during build)
-node_modules/ 
+node_modules/
+
+# Include results directory (contains build-time analysis)
+# results/ 
